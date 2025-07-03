@@ -704,6 +704,139 @@ func TestHandler(t *testing.T) {
 
 		require.Error(t, err)
 	})
+
+	// Tests for slog handler rules compliance (issue #10)
+	t.Run("slog handler rules", func(t *testing.T) {
+		t.Run("zero time ignored", func(t *testing.T) {
+			type Entry struct {
+				Message   string     `json:"message"`
+				Timestamp *time.Time `json:"timestamp"`
+			}
+
+			ctx := context.Background()
+			var capture slogtest.Capture[Entry]
+			logger, errs := slogtest.NewWithErrorHandler(slogdriver.NewHandler(&capture, slogdriver.Config{}))
+
+			// Create a record with zero time
+			r := slog.NewRecord(time.Time{}, slog.LevelInfo, "test message", 0)
+			logger.Handler().Handle(ctx, r)
+			entries := capture.Entries()
+			err := errs.Err()
+
+			require.NoError(t, err)
+			require.Equal(t, 1, len(entries))
+			require.Equal(t, "test message", entries[0].Message)
+			require.Equal(t, (*time.Time)(nil), entries[0].Timestamp)
+		})
+
+		t.Run("zero PC ignored", func(t *testing.T) {
+			type SourceLocation struct {
+				File     *string `json:"file"`
+				Line     *int    `json:"line"`
+				Function *string `json:"function"`
+			}
+
+			type Entry struct {
+				Message        string           `json:"message"`
+				SourceLocation *SourceLocation `json:"logging.googleapis.com/sourceLocation"`
+			}
+
+			ctx := context.Background()
+			var capture slogtest.Capture[Entry]
+			logger, errs := slogtest.NewWithErrorHandler(slogdriver.NewHandler(&capture, slogdriver.Config{}))
+
+			// Create a record with zero PC
+			r := slog.NewRecord(time.Now(), slog.LevelInfo, "test message", 0)
+			logger.Handler().Handle(ctx, r)
+			entries := capture.Entries()
+			err := errs.Err()
+
+			require.NoError(t, err)
+			require.Equal(t, 1, len(entries))
+			require.Equal(t, "test message", entries[0].Message)
+			require.Equal(t, (*SourceLocation)(nil), entries[0].SourceLocation)
+		})
+
+		t.Run("zero attr ignored", func(t *testing.T) {
+			type Entry struct {
+				Message   string `json:"message"`
+				ValidAttr string `json:"valid"`
+				ZeroAttr  *string `json:""`  // This should not appear
+			}
+
+			ctx := context.Background()
+			var capture slogtest.Capture[Entry]
+			logger, errs := slogtest.NewWithErrorHandler(slogdriver.NewHandler(&capture, slogdriver.Config{}))
+
+			// Log with a zero attr (empty key and zero value)
+			logger.LogAttrs(ctx, slog.LevelInfo, "test message",
+				slog.String("valid", "value"),
+				slog.Attr{}, // zero attr - should be ignored
+			)
+			entries := capture.Entries()
+			err := errs.Err()
+
+			require.NoError(t, err)
+			require.Equal(t, 1, len(entries))
+			require.Equal(t, "test message", entries[0].Message)
+			require.Equal(t, "value", entries[0].ValidAttr)
+			require.Equal(t, (*string)(nil), entries[0].ZeroAttr)
+		})
+
+		t.Run("empty group key inlined", func(t *testing.T) {
+			type Entry struct {
+				Message string `json:"message"`
+				Attr1   string `json:"attr1"`
+				Attr2   int    `json:"attr2"`
+			}
+
+			ctx := context.Background()
+			var capture slogtest.Capture[Entry]
+			logger, errs := slogtest.NewWithErrorHandler(slogdriver.NewHandler(&capture, slogdriver.Config{}))
+
+			// Log with an empty group key - attrs should be inlined
+			logger.LogAttrs(ctx, slog.LevelInfo, "test message",
+				slog.Group("", // empty key - should inline the attributes
+					slog.String("attr1", "value1"),
+					slog.Int("attr2", 42),
+				),
+			)
+			entries := capture.Entries()
+			err := errs.Err()
+
+			require.NoError(t, err)
+			require.Equal(t, 1, len(entries))
+			require.Equal(t, "test message", entries[0].Message)
+			require.Equal(t, "value1", entries[0].Attr1)
+			require.Equal(t, 42, entries[0].Attr2)
+		})
+
+		t.Run("empty group ignored", func(t *testing.T) {
+			type Entry struct {
+				Message string      `json:"message"`
+				Group   *struct{}   `json:"group"`
+				Valid   string      `json:"valid"`
+			}
+
+			ctx := context.Background()
+			var capture slogtest.Capture[Entry]
+			logger, errs := slogtest.NewWithErrorHandler(slogdriver.NewHandler(&capture, slogdriver.Config{}))
+
+			// Log with an empty group - should be ignored
+			logger.LogAttrs(ctx, slog.LevelInfo, "test message",
+				slog.String("valid", "value"),
+				slog.Group("group"), // empty group - should be ignored
+			)
+			entries := capture.Entries()
+			err := errs.Err()
+
+			require.NoError(t, err)
+			require.Equal(t, 1, len(entries))
+			require.Equal(t, "test message", entries[0].Message)
+			require.Equal(t, "value", entries[0].Valid)
+			require.Equal(t, (*struct{})(nil), entries[0].Group)
+		})
+	})
 }
 
 func Benchmark(b *testing.B) {
