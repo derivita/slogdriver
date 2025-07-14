@@ -112,6 +112,10 @@ func (h *Handler) addMessage(ctx context.Context, l *goldjson.LineWriter, r *slo
 }
 
 func (h *Handler) addTimestamp(ctx context.Context, l *goldjson.LineWriter, r *slog.Record) {
+	// If r.Time is the zero time, ignore the time
+	if r.Time.IsZero() {
+		return
+	}
 	time := r.Time.Round(0) // strip monotonic to match Attr behavior
 	l.AddTime(fieldTimestamp, time)
 }
@@ -130,6 +134,10 @@ func (h *Handler) addSeverity(ctx context.Context, l *goldjson.LineWriter, r *sl
 }
 
 func (h *Handler) addSourceLocation(ctx context.Context, l *goldjson.LineWriter, r *slog.Record) {
+	// If r.PC is zero, ignore it
+	if r.PC == 0 {
+		return
+	}
 	fs := runtime.CallersFrames([]uintptr{r.PC})
 	f, _ := fs.Next()
 
@@ -198,6 +206,12 @@ func (h *Handler) addAttrsRaw(ctx context.Context, l *goldjson.LineWriter, r *sl
 }
 
 func (h *Handler) addAttr(l *goldjson.LineWriter, a slog.Attr) error {
+	// If an Attr's key and value are both the zero value, ignore the Attr.
+	// This can be tested with attr.Equal(Attr{}).
+	if a.Equal(slog.Attr{}) {
+		return nil
+	}
+	
 	v := a.Value.Resolve()
 	switch v.Kind() {
 	case slog.KindGroup:
@@ -230,14 +244,25 @@ func (h *Handler) addAttr(l *goldjson.LineWriter, a slog.Attr) error {
 
 func (h *Handler) addGroup(l *goldjson.LineWriter, a slog.Attr, v slog.Value) error {
 	attrs := v.Group()
+	// If a group has no Attrs (even if it has a non-empty key), ignore it.
 	if len(attrs) == 0 {
 		return nil
 	}
+	
+	// If a group's key is empty, inline the group's Attrs.
+	if a.Key == "" {
+		var err error
+		for _, attr := range attrs {
+			err = errors.Join(err, h.addAttr(l, attr))
+		}
+		return err
+	}
+	
 	l.StartRecord(a.Key)
 	defer l.EndRecord()
 	var err error
-	for _, a := range attrs {
-		err = errors.Join(err, h.addAttr(l, a))
+	for _, attr := range attrs {
+		err = errors.Join(err, h.addAttr(l, attr))
 	}
 	return err
 }
